@@ -1,0 +1,21 @@
+{
+  "gold_trench_blend": 0.06667,
+  "left_offset": -4,
+  "right_offset": 4,
+  "contact_offset": -3,
+  "ray_anchor_blend": 0.11,
+  "ray_anchor_margin": 3.0,
+  "ray_anchor_floor_margin": 3.0,
+  "ray_floor_step_max": 10.0,
+  "min_trench_contrast": 5.5,
+  "early_spurious_step_max": 11.5,
+  "min_edge_drop": 4.0,
+  "ray_clamp_step_max": 14.0,
+  "edge_guided_min_drop": 4.5,
+  "low_contrast_dark_frac_min": 0.72,
+  "early_hold_dark_ratio_min": 0.65,
+  "full_cover_dark_frac": 0.82,
+  "full_cover_early_frac": 0.78,
+  "training_mae_um": 93.038,
+  "training_images": 10
+}
