@@ -250,7 +250,7 @@ def _gui_state_path():
         base_dir = os.path.dirname(os.path.abspath(__file__))
     except NameError:
         base_dir = os.getcwd()
-    return os.path.join(base_dir, "dhon_gui_state.json")
+    return os.path.join(base_dir, "kinetic_design_state.json")
 
 
 def _export_root_dir():
@@ -323,7 +323,11 @@ def _load_gui_state():
     import os
     p = _gui_state_path()
     if not os.path.exists(p):
-        return {}
+        legacy = os.path.join(os.path.dirname(p), "dhon_gui_state.json")
+        if os.path.exists(legacy):
+            p = legacy
+        else:
+            return {}
     try:
         with open(p, 'r', encoding='utf-8') as f:
             data = json.load(f)
@@ -3671,7 +3675,7 @@ class InteractiveImageViewer(QLabel):
 class ChipDesignGUI(QDialog):
     def __init__(self, parent=None):
         super(ChipDesignGUI, self).__init__(parent)
-        self.setWindowTitle("KLayout Chip Design Configurator")
+        self.setWindowTitle("Kinetic Design Automator")
         self.resize(1500, 860)
 
         saved_state = _load_gui_state()
