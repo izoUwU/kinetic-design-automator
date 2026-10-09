@@ -39,6 +39,7 @@ GLOBAL_PARAMS = {
     'batch_production_count': 1,
     'export_etch_mask': False,
     'export_gold_mask': False,
+    'export_full_mask': False,
     'enable_kinetic_naming': True,
     'kinetic_depth': 190.0,
     'enable_gtt_label': True,
@@ -136,7 +137,8 @@ PARAMETER_HELP = {
     'batch_production_count': "Number of batches to output (e.g. 5 will generate _1 through _5).",
     'batch_production_count': "Number of batches to output (e.g. 5 will generate _1 through _5).",
     'export_etch_mask': "ETCH mask mode: output ONLY a full-chip DXF (*_ETCH.dxf) with the etch geometry, crosshairs and sample name all on layer 1. No other layers, no GDS, no single-quadrant outputs.",
-    'export_gold_mask': "GOLD mask mode: output ONLY a full-chip DXF (*_GOLD.dxf) with the metal geometry, crosshairs and sample name all on layer 2. No other layers, no GDS, no single-quadrant outputs. Optional GTT_### subtitle beneath each sample name (see enable_gtt_label).",
+    'export_gold_mask': "GOLD mask mode: output ONLY a full-chip DXF (*_GOLD.dxf) with the metal geometry, per-quadrant triangles and sample name on layer 2 — no crosshairs. No other layers, no GDS, no single-quadrant outputs. Optional GTT_### subtitle beneath each sample name (see enable_gtt_label).",
+    'export_full_mask': "FULL mask mode: output ONLY the full-chip DXF (*_FULL.dxf) with every layer, but no full-chip GDS and no single-quadrant outputs (no SINGLE .gds/.dxf, no 3D DXF). Can be combined with the ETCH/GOLD mask checkboxes.",
     'kinetic_depth': "Kinetic etch depth (nm) used in the auto-generated K_ sample name when kinetic naming is enabled.",
     'enable_gtt_label': "When on (and Export GOLD mask is on), draw GTT_### centered beneath each sample name and append _GTT_### to the GOLD DXF filename.",
     'gtt_number': "3-digit GTT code (~42% of sample-name size). Used only when enable_gtt_label is on.",
@@ -160,7 +162,7 @@ PARAMETER_HELP = {
     'encap_offset': "Encapsulation (layer 1) inflate around every metal shape (µm). 0 disables the halo.",
     'wire_L1_length': "Length (µm) of each L1 wire (contact edge to wire start).",
     'wire_L1_grid_penetration_um': "How far (µm) the wires push into the capacitor grid from the outer edge.",
-    'num_wires_per_contact': "Number of L1 wires landing on each contact pad.",
+    'num_wires_per_contact': "Number of L1 wires landing on each contact pad. When > 1, kinetic naming uses K2, K3, ... (plain K when 1).",
     'wire_contact_inset_um': "Inset (µm) from the contact edges inside which wires must land.",
     'wire_spacing_um': "Explicit center-to-center distance (µm) between wires. If 0, spacing is computed automatically.",
     'wire_spacing_um': "Explicit center-to-center distance (µm) between wires. If 0, spacing is computed automatically.",
@@ -218,7 +220,7 @@ PARAMETER_HELP = {
     'quadrant_crosshair_offset_x_um': "X offset (µm) of the crosshair center from the quadrant center.",
     'quadrant_crosshair_offset_y_um': "Y offset (µm) of the crosshair center from the quadrant center.",
     'enable_quadrant_triangle': "Draw the small per-quadrant alignment triangle.",
-    'quadrant_triangle_gds_layers': "GDS layer numbers used for the per-quadrant alignment triangle (e.g., [1, 2]). If left at the default [1, 2] while crosshairs use a single layer that is not 1 or 2 (e.g., [3]), the triangle is automatically placed on that same layer so corner alignment does not stay on etch/metal.",
+    'quadrant_triangle_gds_layers': "GDS layer numbers used for the per-quadrant alignment triangle (e.g., [1, 2]). Honored exactly as set; the triangle stays on these layers regardless of the crosshair layer.",
     'quadrant_triangle_width_um':  "Width (µm) of the per-quadrant alignment triangle.",
     'quadrant_triangle_height_um': "Height (µm) of the per-quadrant alignment triangle.",
     'quadrant_triangle_offset_y_um': "Y offset (µm) of the per-quadrant triangle from the quadrant edge.",
@@ -383,6 +385,22 @@ def _confirm_kinetic_depth_before_generate(parent, kinetic_depth, saved_state):
         "Confirm depth",
         'Are you sure about the depth "{0}"?'.format(depth),
     )
+
+
+def _kinetic_prefix(num_wires_per_contact):
+    """K for one wire per contact; K2, K3, ... when num_wires_per_contact > 1."""
+    try:
+        n = int(num_wires_per_contact)
+    except Exception:
+        n = 1
+    if n <= 1:
+        return "K"
+    return f"K{n}"
+
+
+def _build_kinetic_sample_name_base(date_str, w_total, w_l1, depth, num_wires_per_contact=1):
+    prefix = _kinetic_prefix(num_wires_per_contact)
+    return f"{prefix}_{date_str}_{int(w_total)}{int(w_l1)}{int(depth)}"
 
 
 def _format_gtt_label(gtt_number):
@@ -666,11 +684,11 @@ class QuadrantBuilder:
         _tri_def = DEFAULT_QUADRANT_PARAMS['quadrant_triangle_gds_layers']
         self.crosshair_gds_layer_nums = _normalize_gds_layer_list(
             p.get('crosshair_gds_layers', p.get('crosshair_gds_layer', _ch_def)), _ch_def)
-        tri = _normalize_gds_layer_list(p.get('quadrant_triangle_gds_layers'), _tri_def)
-        if (sorted(tri) == [1, 2] and len(tri) == 2 and len(self.crosshair_gds_layer_nums) == 1
-                and self.crosshair_gds_layer_nums[0] not in (1, 2)):
-            tri = list(self.crosshair_gds_layer_nums)
-        self.quadrant_triangle_layer_nums = tri
+        # Honor the configured triangle layers exactly. The small per-quadrant
+        # triangles stay on the etch/metal layers the user sets; only the
+        # crosshairs live on their own (e.g. layer 3). No auto-move.
+        self.quadrant_triangle_layer_nums = _normalize_gds_layer_list(
+            p.get('quadrant_triangle_gds_layers'), _tri_def)
 
         self.quad_ch_len = float(p.get('quadrant_crosshair_length_um', 400.0))
         self.quad_ch_w = float(p.get('quadrant_crosshair_width_um', 10.0))
@@ -1121,16 +1139,101 @@ def _parse_layer_list_ui_text(txt, default):
         return list(default)
 
 
+def _quad_placement_offsets_um(bbox_dbu, dbu, gap_x, gap_y):
+    """Placement offset (dx, dy) in um applied to each quadrant, given a single
+    (identical) quadrant bbox. Mirrors the origin math in create_full_chip_design,
+    so two masks with equal quadrant bboxes place every device identically."""
+    max_w, max_h = bbox_dbu.width(), bbox_dbu.height()
+    origins_x = [-(max_w * dbu + gap_x / 2.), gap_x / 2.]
+    origins_y = [gap_y / 2., -(max_h * dbu + gap_y / 2.)]
+    grid = {"TL": (0, 0), "TR": (1, 0), "BL": (0, 1), "BR": (1, 1)}
+    left_um, bottom_um = bbox_dbu.left * dbu, bbox_dbu.bottom * dbu
+    return {name: (origins_x[c] - left_um, origins_y[r] - bottom_um)
+            for name, (c, r) in grid.items()}
+
+
+def _reference_quadrant_bbox(dbu, quad_params, mask_layer, enable_graphene):
+    """Build a throwaway quadrant in a scratch layout and return its bbox (dbu),
+    configured exactly as create_full_chip_design would for the given mask layer."""
+    try:
+        scratch = pya.Layout()
+        scratch.dbu = dbu
+        slayers = {
+            'etch': scratch.layer(pya.LayerInfo(1, 0)),
+            'metal': scratch.layer(pya.LayerInfo(2, 0)),
+            'crosshairs': scratch.layer(pya.LayerInfo(3, 0)),
+            'border': scratch.layer(pya.LayerInfo(4, 0)),
+            'stem_border': scratch.layer(pya.LayerInfo(15, 0)) if enable_graphene else None,
+            'graphene': scratch.layer(pya.LayerInfo(16, 0)) if enable_graphene else None,
+        }
+        qp = copy.deepcopy(quad_params)
+        if int(mask_layer) == 2:
+            qp['crosshair_gds_layers'] = [3]
+        else:
+            qp['crosshair_gds_layers'] = [int(mask_layer)]
+        qp['quadrant_triangle_gds_layers'] = [int(mask_layer)]
+        qp['sample_name_gds_layers'] = [int(mask_layer)]
+        _cell, _fids, bbox = create_quadrant(scratch, "ALIGN_REF", qp, slayers)
+        return bbox
+    except Exception as e:
+        print(f"[ALIGN CHECK] Reference quadrant build failed: {e}")
+        return None
+
+
+def _verify_mask_alignment(gold_bbox_dbu, quad_params, global_params, tol_um=0.005):
+    """On GOLD export, confirm every quadrant lands exactly where the ETCH mask
+    would place it. The two masks share identical device geometry, so any device's
+    misalignment equals the difference in its quadrant's placement offset. Returns
+    (ok, max_error_um) and prints a report."""
+    dbu = global_params['dbu_um']
+    gap_x, gap_y = global_params['quadrant_gap_x'], global_params['quadrant_gap_y']
+    enable_graphene = global_params.get('enable_graphene', False)
+    etch_bbox = _reference_quadrant_bbox(dbu, quad_params, 1, enable_graphene)
+    if (etch_bbox is None or gold_bbox_dbu is None
+            or etch_bbox.empty() or gold_bbox_dbu.empty()):
+        print("[ALIGN CHECK] Skipped — could not compute reference bbox.")
+        return True, 0.0
+    gold_off = _quad_placement_offsets_um(gold_bbox_dbu, dbu, gap_x, gap_y)
+    etch_off = _quad_placement_offsets_um(etch_bbox, dbu, gap_x, gap_y)
+    max_err, rows = 0.0, []
+    for name in ["TL", "TR", "BL", "BR"]:
+        gdx, gdy = gold_off[name]
+        edx, edy = etch_off[name]
+        ex, ey = gdx - edx, gdy - edy
+        max_err = max(max_err, abs(ex), abs(ey))
+        rows.append((name, ex, ey))
+    ok = max_err <= tol_um
+    print("")
+    print("=" * 62)
+    print(" GOLD<->ETCH ALIGNMENT CHECK (per-quadrant offset, um)")
+    print("=" * 62)
+    for name, ex, ey in rows:
+        print(f"  {name:>2} :  dX = {ex:>10.4f}   dY = {ey:>10.4f}")
+    print("-" * 62)
+    if ok:
+        print(f"  OK - masks aligned (max error {max_err:.4f} um <= {tol_um} um).")
+    else:
+        print("  *** WARNING: GOLD mask is MISALIGNED with ETCH ***")
+        print(f"  max error {max_err:.4f} um exceeds tolerance {tol_um} um.")
+        print("  Check that quadrant crosshairs are still drawn (they set the")
+        print("  quadrant bbox used for placement).")
+    print("=" * 62)
+    return ok, max_err
+
+
 def create_full_chip_design(global_params=None, quad_params=None, params_3d=None,
-                            mask_layer=None, mask_suffix=None, output_dir=None):
+                            mask_layer=None, mask_suffix=None, output_dir=None,
+                            full_dxf_only=False):
     """Build and export the full four-quadrant chip.
 
     Normal mode (mask_layer=None) writes <MMDD>_ALL/<name>_FULL.gds and .dxf.
+    With full_dxf_only=True (FULL mask mode) only the <name>_FULL.dxf is written —
+    the full-chip GDS is skipped.
 
-    Mask mode (mask_layer=1 → ETCH, mask_layer=2 → GOLD): crosshairs,
-    per-quadrant triangles, the central triangle and the sample names are all
-    forced onto `mask_layer`, every other layer is stripped, and ONLY a
-    full-chip DXF (<MMDD>_<ETCH|GOLD>/<name>_<suffix>.dxf) is written — no GDS."""
+    Mask mode (mask_layer=1 → ETCH, mask_layer=2 → GOLD): per-quadrant triangles,
+    the central triangle and sample names are forced onto `mask_layer`. ETCH includes
+    crosshairs; GOLD omits them. Every other layer is stripped, and ONLY a full-chip
+    DXF (<MMDD>_<ETCH|GOLD>/<name>_<suffix>.dxf) is written — no GDS."""
     if global_params is None: global_params = GLOBAL_PARAMS
     if quad_params is None: quad_params = DEFAULT_QUADRANT_PARAMS
 
@@ -1139,9 +1242,17 @@ def create_full_chip_design(global_params=None, quad_params=None, params_3d=None
 
     if mask_layer is not None:
         mask_layer = int(mask_layer)
-        quad_params['crosshair_gds_layers'] = [mask_layer]
+        # Triangles (small per-quadrant + central) and sample names go on the mask
+        # layer so they appear in the exported ETCH/GOLD DXF.
         quad_params['quadrant_triangle_gds_layers'] = [mask_layer]
         quad_params['sample_name_gds_layers'] = [mask_layer]
+        if mask_layer == 2:
+            # GOLD: crosshairs on throwaway layer 3 (stripped below) so the quadrant
+            # bbox matches ETCH, but they do not appear in the gold mask output.
+            quad_params['crosshair_gds_layers'] = [3]
+        else:
+            # ETCH: crosshairs belong on the mask layer and are kept in the export.
+            quad_params['crosshair_gds_layers'] = [mask_layer]
         global_params = copy.deepcopy(global_params)
         global_params['triangle_layer_gds'] = [mask_layer, 0]
 
@@ -1185,6 +1296,11 @@ def create_full_chip_design(global_params=None, quad_params=None, params_3d=None
         quad_cells_list.append(cell_obj); quad_core_bboxes_dbu_list.append(core_bbox_dbu)
         quad_crosshair_local_list.append(_compute_crosshair_positions_from_fiducials(merged_fiducials_um, quad_params_list[i]))
 
+    if mask_layer == 2:
+        # GOLD export: verify every quadrant lands exactly where ETCH puts it.
+        _verify_mask_alignment(quad_core_bboxes_dbu_list[0] if quad_core_bboxes_dbu_list else None,
+                               quad_params, global_params)
+
     top_cell = layout.create_cell("TOP")
     max_w = max((b.width() for b in quad_core_bboxes_dbu_list if b and not b.empty()), default=0)
     max_h = max((b.height() for b in quad_core_bboxes_dbu_list if b and not b.empty()), default=0)
@@ -1227,17 +1343,18 @@ def create_full_chip_design(global_params=None, quad_params=None, params_3d=None
             else:
                 y_target_um = (bbox.bottom * layout.dbu) - global_params['sample_name_offset_y_um']
                 anchor = "top-center"
-            for text_layer in text_layers:
+            for n, text_layer in zip(name_layer_nums, text_layers):
                 create_text(x_center_um, y_target_um, name, top_cell, text_layer, font_h,
                             anchor=anchor, use_klayout_font=True, text_width=font_w)
-                if mask_layer == 2 and global_params.get('enable_gtt_label', True):
-                    gtt_label = _format_gtt_label(global_params.get('gtt_number', 1))
-                    if q_name in ["TL", "TR"]:
-                        y_gtt = y_target_um - gtt_gap
-                    else:
-                        y_gtt = y_target_um - font_h - gtt_gap
-                    create_text(x_center_um, y_gtt, gtt_label, top_cell, text_layer, gtt_h,
-                                anchor="top-center", use_klayout_font=True, text_width=gtt_w)
+            if mask_layer == 2 and global_params.get('enable_gtt_label', True):
+                gtt_label = _format_gtt_label(global_params.get('gtt_number', 1))
+                gtt_layer = layout.layer(pya.LayerInfo(int(mask_layer), 0))
+                if q_name in ["TL", "TR"]:
+                    y_gtt = y_target_um - gtt_gap
+                else:
+                    y_gtt = y_target_um - font_h - gtt_gap
+                create_text(x_center_um, y_gtt, gtt_label, top_cell, gtt_layer, gtt_h,
+                            anchor="top-center", use_klayout_font=True, text_width=gtt_w)
             
     bound_size, bound_w = global_params['boundary_size_um'], global_params['boundary_width_um']
     if bound_size > 0 and bound_w > 0:
@@ -1264,7 +1381,8 @@ def create_full_chip_design(global_params=None, quad_params=None, params_3d=None
         suffix = mask_suffix or f"L{mask_layer}"
         gds_file, dxf_file = None, f"{sanitized_name}_{suffix}.dxf"
     else:
-        gds_file, dxf_file = f"{sanitized_name}_FULL.gds", f"{sanitized_name}_FULL.dxf"
+        gds_file = None if full_dxf_only else f"{sanitized_name}_FULL.gds"
+        dxf_file = f"{sanitized_name}_FULL.dxf"
 
     export_dir = _resolve_export_dir(mask_layer, global_params, output_dir)
     if gds_file is not None:
@@ -1675,7 +1793,8 @@ def create_single_quadrant_chip(global_params=None, quad_params=None, output_pat
 
         for n in name_layer_nums:
             text_layer = layout.layer(pya.LayerInfo(int(n), 0))
-            create_text(x_target_um, y_target_um, name, top_cell, text_layer, font_h, anchor=anchor, use_klayout_font=True, text_width=font_w)
+            create_text(x_target_um, y_target_um, name, top_cell, text_layer, font_h, anchor=anchor,
+                        use_klayout_font=True, text_width=font_w)
 
     clearance, bound_w = SINGLE_QUAD_PARAMS.get('boundary_clearance_um', 500.0), SINGLE_QUAD_PARAMS.get('boundary_width_um', 1.0)
     if bound_w > 0:
@@ -2249,7 +2368,7 @@ def _build_full_chip_preview_layout(global_params, quad_params):
             else:
                 y_um = inst_b.bottom * layout.dbu - float(global_params.get('sample_name_offset_y_um', 0.0))
                 anchor = "top-center"
-            for text_layer in text_layers:
+            for n, text_layer in zip(name_layer_nums, text_layers):
                 try:
                     create_text(center_x_um, y_um, name, top_cell, text_layer, font_h,
                                 anchor=anchor, use_klayout_font=True, text_width=font_w)
@@ -2338,16 +2457,46 @@ class PreviewCanvas(QWidget):
         self._measure_ui_btn = None  # optional checkable QPushButton to sync when tool exits
         self._measure_click_press_xy = None
         self._measure_click_threshold_px = 5.0
-        self._measure_snap_threshold_px = 8.0   # snap radius in screen pixels
         self._rubber_paint_xy = None  # last position that triggered a repaint (throttle)
+        # Object snap ("osnap"): pull picks onto real geometry borders so a
+        # measurement reports the true edge-to-edge distance instead of
+        # whatever pixel the hand happened to land on.
+        self._snap_enabled = True
+        self._snap_radius_px = 14.0
+        self._snap_ui_btn = None
+        self._snap_pt_um = None    # snapped point currently under the cursor
+        self._snap_kind = None     # 'vertex' | 'edge' | None
+        self._snap_seg_um = None   # ((x1, y1), (x2, y2)) edge being snapped to
+        # Uniform grid over polygon bboxes, built lazily on first snap query.
+        self._snap_index = None    # {(ix, iy): [(gds, poly_idx), ...]}
+        self._snap_cell_um = None
+        self._snap_big = []        # polys spanning too many cells to bucket
 
     # --- Public API ---------------------------------------------------------
     def attach_measure_ui_button(self, btn):
         """Optional checkable pushbutton to keep in sync when the tool auto-exits (Esc / new layout)."""
         self._measure_ui_btn = btn
 
+    def attach_snap_ui_button(self, btn):
+        """Optional checkable pushbutton kept in sync when snap is toggled from the canvas (S key)."""
+        self._snap_ui_btn = btn
+
+    def set_snap_enabled(self, enabled):
+        self._snap_enabled = bool(enabled)
+        if not self._snap_enabled:
+            self._clear_snap_preview()
+        btn = getattr(self, '_snap_ui_btn', None)
+        if btn is not None:
+            try:
+                if btn.isChecked() != self._snap_enabled:
+                    btn.setChecked(self._snap_enabled)
+            except Exception:
+                pass
+        self.update()
+
     def set_measure_tool_active(self, active):
         self._measure_tool_active = bool(active)
+        self._clear_snap_preview()
         if not self._measure_tool_active:
             self._measure_phase = 1
             self._measure_p1_um = None
@@ -2451,6 +2600,7 @@ class PreviewCanvas(QWidget):
                 self._layer_min_narrow[gds] = min_narrow
         self._content_bbox_um = bbox_um
         self._invalidate_cache()
+        self._invalidate_snap_index()
         # Keep the user's pan/zoom across parameter tweaks when the content
         # extents barely moved; only snap back to fit on big layout changes.
         if had_data and self._bbox_similar(old_bbox, bbox_um):
@@ -2631,6 +2781,169 @@ class PreviewCanvas(QWidget):
         self._measure_p1_um = None
         self._measure_p2_um = None
         self._rubber_paint_xy = None
+        self._clear_snap_preview()
+
+    # --- Object snap ---------------------------------------------------------
+    def _clear_snap_preview(self):
+        self._snap_pt_um = None
+        self._snap_kind = None
+        self._snap_seg_um = None
+
+    def _invalidate_snap_index(self):
+        self._snap_index = None
+        self._snap_cell_um = None
+        self._snap_big = []
+        self._clear_snap_preview()
+
+    def _build_snap_index(self):
+        """Bucket every polygon bbox into a uniform grid so a snap query only
+        touches the handful of shapes near the cursor, not all of layer 13."""
+        idx = {}
+        big = []
+        minx, miny, maxx, maxy = self._content_bbox_um
+        span = max(maxx - minx, maxy - miny, 1e-9)
+        n = 0
+        for bboxes in self._poly_bboxes_by_layer.values():
+            n += len(bboxes)
+        # ~2 cells per polygon along each axis keeps buckets small but sparse.
+        divs = max(16, min(256, int(math.sqrt(max(n, 1))) * 2))
+        cell = span / float(divs)
+        if not (cell > 0.0):
+            cell = 1.0
+        for gds, bboxes in self._poly_bboxes_by_layer.items():
+            for i, (a, b, c, d) in enumerate(bboxes):
+                ix0 = int(math.floor((a - minx) / cell)); ix1 = int(math.floor((c - minx) / cell))
+                iy0 = int(math.floor((b - miny) / cell)); iy1 = int(math.floor((d - miny) / cell))
+                if (ix1 - ix0 + 1) * (iy1 - iy0 + 1) > 1024:
+                    # Chip-spanning shape (die frame, ground plane): always test it.
+                    big.append((gds, i))
+                    continue
+                for ix in range(ix0, ix1 + 1):
+                    for iy in range(iy0, iy1 + 1):
+                        idx.setdefault((ix, iy), []).append((gds, i))
+        self._snap_index = idx
+        self._snap_cell_um = cell
+        self._snap_big = big
+
+    def _snap_candidates(self, px, py, r_um):
+        """(gds, poly_idx) pairs whose bbox is within r_um of the query point."""
+        if self._snap_index is None:
+            self._build_snap_index()
+        cell = self._snap_cell_um or 1.0
+        minx, miny = self._content_bbox_um[0], self._content_bbox_um[1]
+        ix0 = int(math.floor((px - r_um - minx) / cell)); ix1 = int(math.floor((px + r_um - minx) / cell))
+        iy0 = int(math.floor((py - r_um - miny) / cell)); iy1 = int(math.floor((py + r_um - miny) / cell))
+        seen = set()
+        out = []
+        for ix in range(ix0, ix1 + 1):
+            for iy in range(iy0, iy1 + 1):
+                for item in self._snap_index.get((ix, iy), ()):
+                    if item not in seen:
+                        seen.add(item)
+                        out.append(item)
+        for item in self._snap_big:
+            if item not in seen:
+                seen.add(item)
+                out.append(item)
+        return out
+
+    def _snap_query(self, mx, my):
+        """Nearest geometry border point to widget pixel (mx, my).
+
+        Returns (x_um, y_um, kind, seg) with kind 'vertex' or 'edge' and seg the
+        ((x1, y1), (x2, y2)) edge in µm ('vertex' hits carry the adjoining edge),
+        or None when nothing lies inside the snap radius. Only visible layers
+        take part, so the snap always matches what is actually on screen.
+        """
+        if not self._snap_enabled or not self._polys_by_layer:
+            return None
+        scale = self._scale_for_current_view()
+        if scale <= 0:
+            return None
+        pt = self._widget_px_to_content_um(mx, my)
+        if pt is None:
+            return None
+        px, py = pt
+        r_um = self._snap_radius_px / scale
+        r2 = r_um * r_um
+        # Vertices outrank edges: within this much extra slack a corner wins,
+        # which is what makes clicking near a rectangle's corner feel exact.
+        vertex_slack = 6.0 / scale
+
+        best_v = None; best_v_d2 = r2
+        best_e = None; best_e_d2 = r2
+        budget = 40000  # hard cap on segments examined, keeps mouse-move cheap
+
+        for gds, i in self._snap_candidates(px, py, r_um):
+            if not self._layer_visible.get(gds, False):
+                continue
+            bboxes = self._poly_bboxes_by_layer.get(gds)
+            if bboxes is not None and i < len(bboxes):
+                a, b, c, d = bboxes[i]
+                if px < a - r_um or px > c + r_um or py < b - r_um or py > d + r_um:
+                    continue
+            polys = self._polys_by_layer.get(gds)
+            if not polys or i >= len(polys):
+                continue
+            hull, holes = polys[i]
+            rings = [hull]
+            if holes:
+                rings.extend(holes)
+            for ring in rings:
+                n = len(ring)
+                if n < 2:
+                    continue
+                budget -= n
+                if budget < 0:
+                    break
+                for j in range(n):
+                    ax, ay = ring[j]
+                    bx, by = ring[(j + 1) % n]
+                    dvx = ax - px; dvy = ay - py
+                    dv2 = dvx * dvx + dvy * dvy
+                    if dv2 < best_v_d2:
+                        best_v_d2 = dv2
+                        best_v = ((ax, ay), ((ax, ay), (bx, by)))
+                    vx = bx - ax; vy = by - ay
+                    seg2 = vx * vx + vy * vy
+                    if seg2 <= 1e-18:
+                        continue
+                    t = ((px - ax) * vx + (py - ay) * vy) / seg2
+                    if t <= 0.0 or t >= 1.0:
+                        continue  # endpoints are covered by the vertex pass
+                    qx = ax + t * vx; qy = ay + t * vy
+                    de2 = (qx - px) ** 2 + (qy - py) ** 2
+                    if de2 < best_e_d2:
+                        best_e_d2 = de2
+                        best_e = ((qx, qy), ((ax, ay), (bx, by)))
+            if budget < 0:
+                break
+
+        if best_v is not None:
+            if best_e is None or math.sqrt(best_v_d2) <= math.sqrt(best_e_d2) + vertex_slack:
+                return (best_v[0][0], best_v[0][1], 'vertex', best_v[1])
+        if best_e is not None:
+            return (best_e[0][0], best_e[0][1], 'edge', best_e[1])
+        return None
+
+    def _update_snap_preview(self, mx, my):
+        """Refresh the snap marker under the cursor. True when it changed."""
+        hit = self._snap_query(mx, my) if self._measure_tool_active else None
+        old_pt, old_kind = self._snap_pt_um, self._snap_kind
+        if hit is None:
+            self._clear_snap_preview()
+        else:
+            self._snap_pt_um = (hit[0], hit[1])
+            self._snap_kind = hit[2]
+            self._snap_seg_um = hit[3]
+        return (old_pt != self._snap_pt_um) or (old_kind != self._snap_kind)
+
+    def _measure_point_at(self, mx, my):
+        """Point a click at (mx, my) should record: snapped when geometry is near."""
+        hit = self._snap_query(mx, my)
+        if hit is not None:
+            return (hit[0], hit[1])
+        return self._widget_px_to_content_um(mx, my)
 
     def _apply_measure_cursor(self):
         if not self._measure_tool_active:
@@ -2684,55 +2997,12 @@ class PreviewCanvas(QWidget):
         self._measure_p1_um = None
         self._measure_p2_um = None
         self._rubber_paint_xy = None
-
-    def _snap_point_to_edges(self, x_um, y_um):
-        """Snap (x_um, y_um) to the nearest visible polygon edge within snap radius in µm."""
-        if not self._polys_by_layer:
-            return x_um, y_um
-        scale = self._scale_for_current_view()
-        if scale <= 0:
-            return x_um, y_um
-        snap_radius_um = self._measure_snap_threshold_px / scale
-        best_dist = snap_radius_um
-        best_pt = (x_um, y_um)
-        for gds, polys in self._polys_by_layer.items():
-            if not self._layer_visible.get(gds, True):
-                continue
-            bboxes = self._poly_bboxes_by_layer.get(gds)
-            if bboxes is None:
-                continue
-            for idx, (hull, _holes) in enumerate(polys):
-                bbox = bboxes[idx]
-                bx, by, bx2, by2 = bbox
-                if x_um < bx - best_dist or x_um > bx2 + best_dist or y_um < by - best_dist or y_um > by2 + best_dist:
-                    continue
-                n = len(hull)
-                for i in range(n):
-                    ax, ay = hull[i]
-                    bx3, by3 = hull[(i + 1) % n]
-                    dx = bx3 - ax
-                    dy = by3 - ay
-                    seg2 = dx * dx + dy * dy
-                    if seg2 < 1e-12:
-                        dist = math.hypot(x_um - ax, y_um - ay)
-                        if dist < best_dist:
-                            best_dist = dist
-                            best_pt = (ax, ay)
-                        continue
-                    t = max(0.0, min(1.0, ((x_um - ax) * dx + (y_um - ay) * dy) / seg2))
-                    proj_x = ax + t * dx
-                    proj_y = ay + t * dy
-                    dist = math.hypot(x_um - proj_x, y_um - proj_y)
-                    if dist < best_dist:
-                        best_dist = dist
-                        best_pt = (proj_x, proj_y)
-        return best_pt
+        self._clear_snap_preview()
 
     def _measure_handle_click_at(self, mx, my):
-        pt = self._widget_px_to_content_um(mx, my)
+        pt = self._measure_point_at(mx, my)
         if pt is None:
             return
-        pt = self._snap_point_to_edges(pt[0], pt[1])
         if self._measure_phase == 1:
             self._measure_p1_um = pt
             self._measure_phase = 2
@@ -2769,6 +3039,8 @@ class PreviewCanvas(QWidget):
         p1 = self._measure_p1_um
         p2 = self._measure_p2_um
         cur = self._cursor_um
+
+        self._draw_snap_marker(painter)
 
         if p1 is None:
             return
@@ -2837,6 +3109,47 @@ class PreviewCanvas(QWidget):
             lx = int(round(mx_ + ox - tw / 2.0))
             ly = int(round(my_ + oy - th / 2.0))
             self._draw_measure_label_card(painter, lx, ly, main, sub, dim, white, bold_main=True)
+
+    def _draw_snap_marker(self, painter):
+        """AutoCAD-style osnap glyph: square on a corner, lozenge on an edge,
+        with the target edge highlighted so it is obvious what will be picked."""
+        pt = self._snap_pt_um
+        if pt is None:
+            return
+        w = self._content_um_to_widget_px(pt[0], pt[1])
+        if w is None:
+            return
+        sx, sy = int(round(w[0])), int(round(w[1]))
+        snap_col = QColor(255, 206, 84)
+        seg = self._snap_seg_um
+        if seg is not None:
+            a = self._content_um_to_widget_px(seg[0][0], seg[0][1])
+            b = self._content_um_to_widget_px(seg[1][0], seg[1][1])
+            if a is not None and b is not None:
+                pen = QPen(QColor(255, 206, 84, 130), 3)
+                try:
+                    pen.setCosmetic(True)
+                except Exception:
+                    pass
+                painter.setPen(pen)
+                painter.drawLine(int(round(a[0])), int(round(a[1])),
+                                 int(round(b[0])), int(round(b[1])))
+        pen = QPen(snap_col, 2)
+        try:
+            pen.setCosmetic(True)
+        except Exception:
+            pass
+        painter.setPen(pen)
+        painter.setBrush(QBrush(QColor(0, 0, 0, 0)))
+        r = 6
+        if self._snap_kind == 'vertex':
+            painter.drawRect(sx - r, sy - r, 2 * r, 2 * r)
+        else:
+            # Lozenge (rotated square) marks a point along an edge.
+            painter.drawLine(sx, sy - r, sx + r, sy)
+            painter.drawLine(sx + r, sy, sx, sy + r)
+            painter.drawLine(sx, sy + r, sx - r, sy)
+            painter.drawLine(sx - r, sy, sx, sy - r)
 
     def _draw_measure_label_card(self, painter, x, y, main, sub, bg, fg, bold_main=False):
         """Small floating readout with a dark card behind text for contrast."""
@@ -3140,6 +3453,14 @@ class PreviewCanvas(QWidget):
                 footer += "   MEASURE: pick point B  (right-click = reset)"
             else:
                 footer += "   MEASURE: click for new A→B  ·  Esc = exit tool"
+            if not self._snap_enabled:
+                footer += "  ·  snap OFF (S)"
+            elif self._snap_kind == 'vertex':
+                footer += "  ·  SNAP: corner"
+            elif self._snap_kind == 'edge':
+                footer += "  ·  SNAP: edge"
+            else:
+                footer += "  ·  snap on (S)"
         painter.setPen(QPen(QColor(170, 170, 200)))
         painter.drawText(8, self.height() - 8, footer)
         self._draw_measure_overlay(painter)
@@ -3175,16 +3496,21 @@ class PreviewCanvas(QWidget):
         """Layout-µm under cursor (for scale overlay + measure rubber band)."""
         if not self._polys_by_layer:
             self._cursor_um = None
+            self._clear_snap_preview()
             return
-        need = self._measure_overlay or (self._measure_tool_active and self._measure_phase == 2)
+        need = self._measure_overlay or self._measure_tool_active
         if not need:
             self._cursor_um = None
+            self._clear_snap_preview()
             return
         mx, my = self._event_pos(event)
-        pt = self._widget_px_to_content_um(mx, my)
-        if pt is not None and self._measure_tool_active and self._measure_phase == 2:
-            pt = self._snap_point_to_edges(pt[0], pt[1])
-        self._cursor_um = pt
+        self._update_snap_preview(mx, my)
+        # While measuring, the readout follows the snapped point so the footer
+        # µm and the rubber band agree with where the click would actually land.
+        if self._measure_tool_active and self._snap_pt_um is not None:
+            self._cursor_um = self._snap_pt_um
+        else:
+            self._cursor_um = self._widget_px_to_content_um(mx, my)
 
     def wheelEvent(self, event):
         d = _wheel_delta(event)
@@ -3270,10 +3596,13 @@ class PreviewCanvas(QWidget):
         self._sync_cursor_from_event(event)
         panning = self._last_mouse is not None
         if not panning:
-            if self._measure_tool_active and self._measure_phase == 2:
+            if self._measure_tool_active:
                 mx, my = self._event_pos(event)
                 rp = self._rubber_paint_xy
-                if rp is None or (mx - rp[0]) ** 2 + (my - rp[1]) ** 2 >= 16.0:
+                # Repaint on small moves too when a snap marker is live, so the
+                # marker tracks corners instead of lagging the 4 px threshold.
+                thresh = 1.0 if self._snap_pt_um is not None else 16.0
+                if rp is None or (mx - rp[0]) ** 2 + (my - rp[1]) ** 2 >= thresh:
                     self._rubber_paint_xy = (mx, my)
                     self.update()
             elif self._measure_overlay:
@@ -3292,6 +3621,7 @@ class PreviewCanvas(QWidget):
     def leaveEvent(self, event):
         self._cursor_um = None
         self._rubber_paint_xy = None
+        self._clear_snap_preview()
         try:
             super(PreviewCanvas, self).leaveEvent(event)
         except Exception:
@@ -3308,6 +3638,10 @@ class PreviewCanvas(QWidget):
         if esc is not None and key == esc and self._measure_tool_active:
             self.set_measure_tool_active(False)
             self.update()
+            return
+        key_s = _qt_enum(_Qt, 'Key.Key_S')
+        if key_s is not None and key == key_s and self._measure_tool_active:
+            self.set_snap_enabled(not self._snap_enabled)
             return
         try:
             super(PreviewCanvas, self).keyPressEvent(event)
@@ -3609,6 +3943,8 @@ class ChipDesignGUI(QDialog):
         self.btn_measure_distance.setToolTip(
             "Interactive two-point distance in layout micrometres (same frame as the GDS preview).\n"
             "Turn on, click point A, then point B — length and Δx/Δy appear on canvas.\n"
+            "Picks snap to the nearest visible polygon corner or edge (see 'Snap to edges'),\n"
+            "so a measurement reports the true border-to-border distance.\n"
             "Right-click resets the current segment; Esc turns the tool off.\n"
             "Pan (left drag) and zoom still work; measurement graphics are drawn on top without re-rasterising the chip."
         )
@@ -3617,9 +3953,27 @@ class ChipDesignGUI(QDialog):
             self.btn_measure_distance.clicked,
             lambda *args: self.preview_canvas.set_measure_tool_active(self.btn_measure_distance.isChecked()),
         )
+        self.btn_measure_snap = QPushButton("Snap to edges")
+        self.btn_measure_snap.setCheckable(True)
+        self.btn_measure_snap.setChecked(True)
+        self.btn_measure_snap.setToolTip(
+            "Object snap for the measure tool (AutoCAD 'osnap').\n"
+            "ON: each pick jumps to the nearest corner or edge of a visible layer\n"
+            "within ~14 px — a square marker means a corner, a lozenge means a\n"
+            "point on the highlighted edge. Corners win over edges when both are close.\n"
+            "OFF: picks land exactly on the clicked pixel (free measurement).\n"
+            "S toggles this while the measure tool has canvas focus.\n"
+            "Only visible layers snap, so hide a layer to measure past it."
+        )
+        self.preview_canvas.attach_snap_ui_button(self.btn_measure_snap)
+        _connect_signal(
+            self.btn_measure_snap.clicked,
+            lambda *args: self.preview_canvas.set_snap_enabled(self.btn_measure_snap.isChecked()),
+        )
         self.preview_btn_row.addWidget(self.btn_fit_view)
         self.preview_btn_row.addWidget(self.btn_rebuild_preview)
         self.preview_btn_row.addWidget(self.btn_measure_distance)
+        self.preview_btn_row.addWidget(self.btn_measure_snap)
         self.center_layout.addLayout(self.preview_btn_row)
 
         # --- RIGHT: scrollable layer toggle panel (narrow column) ---
@@ -4595,7 +4949,9 @@ class ChipDesignGUI(QDialog):
             enc_off = int(local_quad.get('encap_offset', 1))
             w_total = w_l1 + 2 * enc_off
             depth = int(local_global.get('kinetic_depth', 190.0))
-            local_global['sample_name_base'] = f"K_{date_str}_{w_total}{w_l1}{depth}"
+            num_wires = int(local_quad.get('num_wires_per_contact', 1))
+            local_global['sample_name_base'] = _build_kinetic_sample_name_base(
+                date_str, w_total, w_l1, depth, num_wires)
 
         return local_global, local_quad, local_3d
 
@@ -5097,7 +5453,9 @@ class ChipDesignGUI(QDialog):
                 enc_off = int(local_quad_params.get('encap_offset', 1))
                 w_total = w_l1 + 2 * enc_off
                 depth = int(local_global_params.get('kinetic_depth', 190.0))
-                base_sample_name = f"K_{date_str}_{w_total}{w_l1}{depth}"
+                num_wires = int(local_quad_params.get('num_wires_per_contact', 1))
+                base_sample_name = _build_kinetic_sample_name_base(
+                    date_str, w_total, w_l1, depth, num_wires)
 
             # Mask modes: full-chip DXF only, everything on a single layer.
             mask_jobs = []
@@ -5105,6 +5463,8 @@ class ChipDesignGUI(QDialog):
                 mask_jobs.append((1, 'ETCH'))
             if local_global_params.get('export_gold_mask', False):
                 mask_jobs.append((2, 'GOLD'))
+            # FULL mask mode: full-chip DXF only (all layers), no GDS, no single outputs.
+            full_mask = bool(local_global_params.get('export_full_mask', False))
 
             for i in range(1, batch_count + 1):
                 batch_global_params = copy.deepcopy(local_global_params)
@@ -5115,12 +5475,16 @@ class ChipDesignGUI(QDialog):
                     batch_global_params['sample_name_base'] = base_sample_name
                 
                 print(f"Generating batch {i}/{batch_count} with base name: {batch_global_params.get('sample_name_base', 'sample')}...")
-                if mask_jobs:
+                if mask_jobs or full_mask:
                     for mask_layer, mask_suffix in mask_jobs:
                         mask_params = copy.deepcopy(batch_global_params)
                         print(f"{mask_suffix} mask mode: layer {mask_layer} only, full-chip DXF only.")
                         create_full_chip_design(mask_params, local_quad_params, params_3d=local_params_3d,
                                                 mask_layer=mask_layer, mask_suffix=mask_suffix)
+                    if full_mask:
+                        print("FULL mask mode: full-chip DXF only (all layers, no GDS, no single).")
+                        create_full_chip_design(copy.deepcopy(batch_global_params), local_quad_params,
+                                                params_3d=local_params_3d, full_dxf_only=True)
                 else:
                     create_full_chip_design(batch_global_params, local_quad_params, params_3d=local_params_3d)
                     create_single_quadrant_chip(batch_global_params, local_quad_params, params_3d=local_params_3d)
